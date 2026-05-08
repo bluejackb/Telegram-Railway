@@ -29,7 +29,7 @@ if not BOT_TOKEN:
     raise RuntimeError("Set TELEGRAM_BOT_TOKEN")
 
 NEW_YORK = ZoneInfo("America/New_York")
-POLL_CLOSE = datetime(2026, 5, 9, 22, 0, tzinfo=NEW_YORK)
+POLL_CLOSE = datetime(2026, 5, 16, 22, 0, tzinfo=NEW_YORK)
 if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_VOLUME_MOUNT_PATH"):
     default_db_dir = Path(os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "/app/data"))
 else:
