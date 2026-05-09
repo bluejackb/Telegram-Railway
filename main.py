@@ -41,6 +41,7 @@ ADMIN_USER_IDS = {
     for user_id in os.getenv("ADMIN_USER_IDS", "").split(",")
     if user_id.strip()
 }
+SCENES_PER_PAGE = 5
 
 VIDEO_DATA = [
     {"option_key": "option1", "title": "The Good Side Of Lagos", "file_id": "BAACAgEAAxkBAAIBYmn7QJlksldLl5oMdlc5GLjLreYJAAMGAAJgxthHvB73FlhDAZA7BA", "cost": 8.00, "callback_data": "vote_option1"},
@@ -168,6 +169,71 @@ def callback_to_option_key(callback_data: str) -> str | None:
     return None
 
 
+def build_vote_markup(callback_data: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Vote for this scene", callback_data=callback_data)]]
+    )
+
+
+def get_total_pages(item_count: int) -> int:
+    return max(1, (item_count + SCENES_PER_PAGE - 1) // SCENES_PER_PAGE)
+
+
+def build_page_markup(page: int, total_pages: int) -> InlineKeyboardMarkup | None:
+    buttons = []
+    if page > 1:
+        buttons.append(InlineKeyboardButton("⬅️ Previous 5", callback_data=f"page_{page - 1}"))
+    if page < total_pages:
+        label = "Show first 5 scenes" if page == 0 else "Next 5 ➡️"
+        buttons.append(InlineKeyboardButton(label, callback_data=f"page_{page + 1}"))
+    if not buttons:
+        return None
+    return InlineKeyboardMarkup([buttons])
+
+
+async def send_scene_page(bot, chat_id: int, page: int) -> None:
+    videos = load_videos()
+    total_pages = get_total_pages(len(videos))
+    page = max(1, min(page, total_pages))
+    start_index = (page - 1) * SCENES_PER_PAGE
+    end_index = min(start_index + SCENES_PER_PAGE, len(videos))
+
+    for video in videos[start_index:end_index]:
+        text = (
+            f"🎬 <b>{video['title']}</b>\n"
+            f"💵 Cost: ${video['cost']:.2f}\n\n"
+            "<b>Tap below to vote for this scene.</b>"
+        )
+
+        if video["file_id"]:
+            await bot.send_video(
+                chat_id=chat_id,
+                video=video["file_id"],
+                caption=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=build_vote_markup(video["callback_data"]),
+            )
+        else:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=build_vote_markup(video["callback_data"]),
+            )
+
+    status_text = f"Showing scenes {start_index + 1}-{end_index} of {len(videos)}."
+    if page < total_pages:
+        status_text += "\nTap below to load the next previews."
+    else:
+        status_text += "\nYou’ve reached the final preview batch."
+
+    await bot.send_message(
+        chat_id=chat_id,
+        text=status_text,
+        reply_markup=build_page_markup(page, total_pages),
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
         return
@@ -175,31 +241,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     close_label = POLL_CLOSE.strftime("%B %d, %Y at %I:%M %p %Z")
     intro = (
         "🇳🇬 <b>Wild Lagos PPV Poll</b> 🇳🇬\n\n"
-        "🎬 The videos below are scene previews.\n"
+        "🎬 Scene previews load in batches of 5.\n"
         "🗳️ Vote for any scenes you want.\n"
         "✅ You can vote once per scene.\n\n"
         f"⏰ Voting closes on <b>{close_label}</b>."
     )
     await update.message.reply_text(intro, parse_mode=ParseMode.HTML)
+    await update.message.reply_text(
+        "Tap below when you're ready to view the first 5 scene previews.",
+        reply_markup=build_page_markup(0, get_total_pages(len(load_videos()))),
+    )
 
-    for video in load_videos():
-        text = (
-            f"🎬 <b>{video['title']}</b>\n"
-            f"💵 Cost: ${video['cost']:.2f}\n\n"
-            "<b>Tap below to vote for this scene.</b>"
-        )
-        markup = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Vote for this scene", callback_data=video["callback_data"])]]
-        )
 
-        if video["file_id"]:
-            await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-            await update.message.reply_video(
-                video=video["file_id"],
-                reply_markup=markup,
-            )
-        else:
-            await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+async def show_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None or query.message is None:
+        return
+
+    try:
+        page = int(query.data.split("_", maxsplit=1)[1])
+    except (IndexError, ValueError):
+        await query.answer("Invalid page request.", show_alert=True)
+        return
+
+    await query.answer()
+    try:
+        await query.message.delete()
+    except Exception:
+        LOGGER.warning("Could not delete pagination message before loading next batch.")
+
+    await send_scene_page(context.bot, query.message.chat_id, page)
 
 
 async def vote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -264,7 +335,8 @@ def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("results", results))
-    application.add_handler(CallbackQueryHandler(vote))
+    application.add_handler(CallbackQueryHandler(show_page, pattern=r"^page_\d+$"))
+    application.add_handler(CallbackQueryHandler(vote, pattern=r"^vote_"))
     application.add_handler(MessageHandler(filters.VIDEO, debug_video))
     LOGGER.info("Starting bot with database at %s", DB_PATH)
     application.run_polling()
